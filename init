@@ -1,0 +1,162 @@
+#!/bin/busybox sh
+
+# Set up essential environment
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+# Initialize system
+/bin/busybox echo "=== Radxa Taco kexec boot initializing ===" > /dev/kmsg
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox echo "Basic filesystems mounted" > /dev/kmsg
+
+# Load common USB modules
+modules="ehci-pci ehci-hcd xhci-pci xhci-hcd usbhid hid-generic"
+
+# Copy them to your initramfs
+for mod in $modules; do
+    find /lib/modules/$(uname -r) -name "${mod}.ko" -exec cp {} initramfs/lib/modules/ \;
+done
+
+# Load PCIe drivers
+/bin/busybox echo "Loading PCIe drivers..." > /dev/kmsg
+/bin/busybox insmod /lib/modules/pcieport.ko 2>/dev/kmsg || /bin/busybox echo "Warning: pcieport module load error (may be built-in)" > /dev/kmsg
+
+# Give hardware time to initialize
+/bin/busybox echo "Waiting for devices to settle..." > /dev/kmsg
+/bin/busybox sleep 3
+
+# Check for NVMe drive
+/bin/busybox echo "Looking for NVMe drive..." > /dev/kmsg
+if [ -b /dev/nvme0n1p1 ]; then
+    /bin/busybox echo "Found NVMe drive!" > /dev/kmsg
+
+    # Create mount points
+    /bin/busybox mkdir -p /mnt/boot
+    /bin/busybox mkdir -p /mnt/root
+
+    # Mount partitions - Bookworm typically has boot on p1, root on p2
+    /bin/busybox echo "Mounting partitions..." > /dev/kmsg
+    /bin/busybox mount /dev/nvme0n1p1 /mnt/boot || {
+        /bin/busybox echo "ERROR: Failed to mount boot partition!" > /dev/kmsg
+        goto_shell
+    }
+
+    # Check if we've already set up SSH in a previous boot
+    if [ ! -f /mnt/boot/ssh_setup_done ]; then
+        /bin/busybox echo "First-time SSH setup..." > /dev/kmsg
+        
+        # Enable SSH
+        /bin/busybox touch /mnt/boot/ssh
+        
+        # Copy userconf.txt if it exists, otherwise create the default pi user
+        if [-f "/user_configs/userconf.txt"]; then
+            /bin/busybox cp /user_configs/userconf.txt /mnt/boot/userconf.txt
+        else
+            /bin/busybox echo 'pi:$6$aBTOtfS0ErNO1tkC$5lPbA/pI8jkIelinefWrGbD79Onh3LTa0cCiVly2nxT1wRjvDamO4Unna0onu0WzEDavlkdMH5x.EIu.Tdpif1' > /mnt/boot/userconf.txt
+        fi
+        
+        # Mount root partition
+        /bin/busybox mkdir -p /mnt/root
+        /bin/busybox mount /dev/nvme0n1p2 /mnt/root
+        
+        # Set up SSH key
+        if [ -f "/ssh_keys/id_rsa.pub" ]; then
+            SSH_DIR="/mnt/root/home/pi/.ssh"
+            /bin/busybox mkdir -p "$SSH_DIR"
+            /bin/busybox cat /ssh_keys/id_rsa.pub > "$SSH_DIR/authorized_keys"
+            /bin/busybox chmod 700 "$SSH_DIR"
+            /bin/busybox chmod 600 "$SSH_DIR/authorized_keys"
+            /bin/busybox chown -R 1000:1000 "$SSH_DIR"
+        fi
+        
+        # Unmount root partition
+        /bin/busybox umount /mnt/root
+        
+        # Create flag file to indicate SSH is set up
+        /bin/busybox touch /mnt/boot/ssh_setup_done
+        
+        /bin/busybox echo "SSH setup complete" > /dev/kmsg
+    else
+        /bin/busybox echo "SSH already set up, skipping configuration" > /dev/kmsg
+    fi
+
+    # Display found kernel files for debugging
+    /bin/busybox echo "Files in boot partition:" > /dev/kmsg
+    /bin/busybox ls -la /mnt/boot > /dev/kmsg
+
+    # Check for Raspberry Pi kernel
+    if [ -f /mnt/boot/kernel8.img ]; then
+        /bin/busybox echo "Found kernel8.img, preparing kexec..." > /dev/kmsg
+        KERNEL="/mnt/boot/kernel8.img"
+
+        # Check for initramfs (bookworm might have one)
+        if [ -f /mnt/boot/initrd.img ]; then
+            /bin/busybox echo "Using initrd.img" > /dev/kmsg
+            INITRD="--initrd=/mnt/boot/initrd.img"
+        elif [ -f /mnt/boot/initramfs.img ]; then
+            /bin/busybox echo "Using initramfs.img" > /dev/kmsg
+            INITRD="--initrd=/mnt/boot/initramfs.img"
+        else
+            /bin/busybox echo "No initramfs found, continuing without it" > /dev/kmsg
+            INITRD=""
+        fi
+
+       # Get original cmdline
+       if [ -f /mnt/boot/cmdline.txt ]; then
+           ORIG_CMDLINE=$(/bin/busybox cat /mnt/boot/cmdline.txt)
+           /bin/busybox echo "Original cmdline: $ORIG_CMDLINE" > /dev/kmsg
+
+           # Strip root= parameter if present and add our own
+           # NEW_CMDLINE=$(/bin/busybox echo "$ORIG_CMDLINE" | /bin/busybox sed 's/root=[^ ]*//g')
+           NEW_CMDLINE=$(/bin/busybox echo "$ORIG_CMDLINE" | /bin/busybox sed 's/root=[^ ]* / /g; s/root=[^ ]*$//g; s/  / /g')
+           CMDLINE="$NEW_CMDLINE root=/dev/nvme0n1p2 rw"
+       else
+           # Default cmdline if none found
+           CMDLINE="console=serial0,115200 console=tty1 root=/dev/nvme0n1p2 rootfstype=ext4 fsck.repair=yes rw rootwait"
+       fi
+
+        # Instead of manipulating the original cmdline, create a new one
+        # CMDLINE="console=serial0,115200 console=tty1 root=/dev/nvme0n1p2 rootfstype=ext4 fsck.repair=yes rw rootwait"
+        # CMDLINE="console=serial0,115200 console=tty1 root=/dev/nvme0n1p2 rootfstype=ext4 fsck.repair=yes rootwait quiet init=/usr/lib/raspberrypi-sys-mods/firstboot"
+	    # CMDLINE="console=serial0,115200 console=tty1 root=/dev/nvme0n1p2 rootfstype=ext4 fsck.repair=yes rootwait systemd.run=/boot/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target"
+
+        /bin/busybox echo "Using clean cmdline: $CMDLINE" > /dev/kmsg
+
+        # Execute kexec
+        /bin/busybox echo "Loading kernel with kexec..." > /dev/kmsg
+        /sbin/kexec --load "$KERNEL" $INITRD --command-line="$CMDLINE"
+
+        if [ $? -eq 0 ]; then
+            /bin/busybox echo "Kernel loaded successfully, executing kexec..." > /dev/kmsg
+            /bin/busybox sync
+            /sbin/kexec -e
+
+            # Should never get here unless kexec fails
+            /bin/busybox echo "ERROR: kexec -e failed to boot!" > /dev/kmsg
+        else
+            /bin/busybox echo "ERROR: kexec --load failed!" > /dev/kmsg
+        fi
+    else
+        /bin/busybox echo "ERROR: kernel8.img not found in boot partition!" > /dev/kmsg
+        /bin/busybox echo "Available files:" > /dev/kmsg
+        /bin/busybox ls -la /mnt/boot > /dev/kmsg
+    fi
+else
+    /bin/busybox echo "ERROR: NVMe drive not found!" > /dev/kmsg
+    /bin/busybox echo "Available block devices:" > /dev/kmsg
+    /bin/busybox ls -la /dev/nvme* 2>/dev/kmsg || /bin/busybox echo "  No NVMe devices found!" > /dev/kmsg
+    /bin/busybox ls -la /dev/sd* 2>/dev/kmsg || /bin/busybox echo "  No SCSI/SATA devices found!" > /dev/kmsg
+fi
+
+# Function for emergency shell
+goto_shell() {
+    /bin/busybox echo "Boot process failed! Starting emergency shell..." > /dev/kmsg
+    /bin/busybox echo "Type 'exit' to reboot the system" > /dev/kmsg
+    exec /bin/busybox sh
+}
+
+# If we get here, something went wrong
+goto_shell
+
