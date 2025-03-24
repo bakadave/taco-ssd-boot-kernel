@@ -2,7 +2,6 @@ busybox*/
 initramfs/*
 !initramfs/init
 staging/
-firmware/
 raspbian/
 *.tar.gz
 *.tar.bz2
