@@ -4,7 +4,7 @@
 # Configuration
 OUTPUT_IMAGE="radxa-taco-boot.img"
 BOOT_SIZE_MB=50  # Size of boot partition in MB
-STAGING_DIR="./staging" # Your boot files directory
+STAGING_DIR="../staging" # Your boot files directory
 
 echo "Creating image of size ${BOOT_SIZE_MB}MB..."
 # Create empty image file for boot partition

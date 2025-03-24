@@ -2,8 +2,10 @@ busybox*/
 initramfs/*
 !initramfs/init
 staging/
+scripts/mnt/
 raspbian/
 *.tar.gz
 *.tar.bz2
 *.tar.xz
 *.tar.lz
+*.img
