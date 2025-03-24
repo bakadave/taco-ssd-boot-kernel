@@ -1,8 +1,9 @@
 busybox*/
-initramfs/
-staging/
-firmware/
-raspbian/
+initramfs/*
+!initramfs/init
+staging/*
+firmware/*
+raspbian/*
 *.tar.gz
 *.tar.bz2
 *.tar.xz
